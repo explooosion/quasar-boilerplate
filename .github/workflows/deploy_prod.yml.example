@@ -1,0 +1,146 @@
+# Copyright 2019 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+
+# HOW TO USE
+
+# Add Github Secret
+# 1. PROJECT_ID
+# 2. SA_KEY
+
+# Edit YML File
+# 1. edit workflow name
+# 2. edit pull_request branches name
+# 3. edit global env
+# 4. edit env [BRANCH] in step [3. Checkout]
+# 5. edit env [RELEASE_TAG_PREFIX] in step [10. Create Release Tag]
+
+
+name: "My Project Deploy"
+
+on:
+  # everyday at 18 pm
+  # ref: https://docs.github.com/en/free-pro-team@latest/actions/reference/events-that-trigger-workflows#scheduled-events
+  # schedule:
+  #   - cron:  '* 18 * * *'
+  pull_request:
+    branches: [ test_server ]
+    types: [ closed ]
+
+env:
+  PROJECT_ID: ${{ secrets.PROJECT_ID }}
+  GKE_CLUSTER: cluster
+  GKE_ZONE: asia-east2-a
+  DEPLOYMENT_NAME: dev-name
+  IMAGE: my-image
+  QENV: dev
+
+jobs:
+  setup-build-publish-deploy:
+
+    name: Deploy Project To GKE
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+    # STEP1. Initial docker timezone
+    - name: 1. Set Timezone
+      uses: szenius/set-timezone@v1.0
+      with:
+        timezoneLinux: "Asia/Taipei"
+
+    # STEP2. Get docker time
+    - name: 2. Add Current Date Time Variable
+      uses: srfrnk/current-time@v1.1.0
+      id: current-time
+      with:
+        format: YYYY-MM-DD-HH-mm
+
+    # STEP3. Checkout branch
+    - name: 3. Checkout
+      uses: actions/checkout@v2
+      env:
+        BRANCH: "test_server"
+      with:
+        ref: ${{ env.BRANCH }}
+
+    # STEP4. Setup gcloud CLI
+    - name: 4. Setup gcloud CLI
+      uses: GoogleCloudPlatform/github-actions/setup-gcloud@master
+      with:
+        version: '290.0.1'
+        service_account_key: ${{ secrets.SA_KEY }}
+        project_id: ${{ secrets.PROJECT_ID }}
+
+    # STEP5. Configure docker to use the gcloud command-line tool as a credential
+    - name: 5. Configure gcloud Authentication
+      run: |-
+        gcloud --quiet auth configure-docker
+
+    # STEP6. Get the gke credentials so we can deploy to the cluster
+    - name: 6. Get GKE Credentials
+      run: |-
+        gcloud container clusters get-credentials "$GKE_CLUSTER" --zone "$GKE_ZONE"
+
+    # STEP7. Build the docker image
+    - name: 7. Build Docker Image
+      env:
+        TIME: "${{ steps.current-time.outputs.formattedTime }}"
+      run: |-
+        docker build \
+          --tag "gcr.io/$PROJECT_ID/$IMAGE:$TIME" \
+          --build-arg QENV="$QENV" \
+          .
+
+    # STEP8. Push the docker image to google container registry
+    - name: 8. Publish Container Registry
+      env:
+        TIME: "${{ steps.current-time.outputs.formattedTime }}"
+      run: |-
+        docker push "gcr.io/$PROJECT_ID/$IMAGE:$TIME"
+
+    # STEP9. Deploy the docker image to the gke cluster
+    - name: 9. Deploy Kubernetes Engine
+      env:
+        TIME: "${{ steps.current-time.outputs.formattedTime }}"
+      run: |-
+        kubectl config use-context gke_${PROJECT_ID}_${GKE_ZONE}_${GKE_CLUSTER}
+        kubectl set image deployment/$DEPLOYMENT_NAME $DEPLOYMENT_NAME=gcr.io/$PROJECT_ID/$IMAGE:$TIME
+
+    # STEP10. Release github tag
+    - name: 10. Create Github Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        RELEASE_TAG_PREFIX: "project-test-"
+        TIME: "${{ steps.current-time.outputs.formattedTime }}"
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # This token is provided by Actions, you do not need to create your own token
+      with:
+        tag_name: "${{ env.RELEASE_TAG_PREFIX }}${{ env.TIME }}"
+        release_name: "${{ env.RELEASE_TAG_PREFIX }}${{ env.TIME }}"
+        body: |
+          ### Changelogs
+
+          Release By Pull Request: ${{ github.ref }}
+          - Auto Build By Github Actions
+          - Deploy On GKE
+        draft: false
+        prerelease: false
+
+    # RESULT: Echo release link
+    - name: Echo Release Url
+      env:
+        URL: "${{ steps.create_release.outputs.html_url }}"
+      run: "echo $URL"
